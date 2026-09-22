@@ -73,5 +73,24 @@ jobs:
           uv run --no-sync ruff check --config ruff-tests.toml tests/unit/llms/webiq tests/unit/conftest.py tests/unit/test_socket_policy.py
           uv run --no-sync ruff format --check litellm/llms/webiq tests/unit/llms/webiq
           git diff --exit-code
+      - name: Benchmark catalog setup regression
+        run: |
+          uv run --no-sync python - <<'PYTHON'
+          import os
+          import subprocess
+          command = ["uv", "run", "--no-sync", "pytest", "--import-mode=importlib", "-p", "pytest_codspeed.plugin", "tests/benchmarks/", "--codspeed", "--collect-only", "-q"]
+          unfixed = {key: value for key, value in os.environ.items() if key != "LITELLM_LOCAL_MODEL_COST_MAP"}
+          unfixed["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+          rejected = subprocess.run(command, env=unfixed, capture_output=True, text=True)
+          print(rejected.stdout, rejected.stderr, flush=True)
+          assert rejected.returncode == 4
+          assert "Set LITELLM_LOCAL_MODEL_COST_MAP=True" in rejected.stdout + rejected.stderr
+          fixed = dict(unfixed, LITELLM_LOCAL_MODEL_COST_MAP="True")
+          accepted = subprocess.run(command, env=fixed, capture_output=True, text=True)
+          print(accepted.stdout, accepted.stderr, flush=True)
+          assert accepted.returncode == 0
+          assert "31 tests collected" in accepted.stdout
+          print("Verified benchmark setup rejects an unpinned catalog and collects all 31 benchmarks with the bundled catalog")
+          PYTHON
       - name: Repository checks
         run: make check
