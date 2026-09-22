@@ -10,6 +10,7 @@ jobs:
     timeout-minutes: 30
     env:
       LITELLM_LOCAL_MODEL_COST_MAP: "True"
+      COVERAGE_CORE: sysmon
       BASE_REF: "7210403e2334504872f2c46220d9a0fd36eab622"
     steps:
       - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955
@@ -54,7 +55,7 @@ jobs:
           PYTHON
       - name: Run provider and socket-policy tests with two workers
         run: |
-          uv run --no-sync pytest tests/unit/llms/webiq tests/unit/test_socket_policy.py -n 2 --dist=loadscope -v --reruns 0 --timeout=60 --cov=litellm.llms.webiq --cov-report=term-missing --junitxml=webiq-parallel.xml
+          uv run --no-sync pytest tests/unit/llms/webiq tests/unit/test_socket_policy.py -n 2 --dist=loadscope -v --reruns 0 --timeout=60 --cov=litellm/llms/webiq --cov-report=term-missing --junitxml=webiq-parallel.xml
           uv run --no-sync python - <<'PYTHON'
           import xml.etree.ElementTree as ET
           suite = ET.parse("webiq-parallel.xml").getroot().find("testsuite")
