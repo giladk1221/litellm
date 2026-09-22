@@ -31,6 +31,35 @@ jobs:
         run: uv run --no-sync pytest tests/unit/llms/webiq/search -v --cov=litellm.llms.webiq --cov-report=term-missing
       - name: Existing search interception regressions
         run: uv run --no-sync pytest tests/test_litellm/integrations/websearch_interception -q --maxfail=3
-      - name: Repository checks
-        if: always()
-        run: make check
+      - name: Targeted mutation checks
+        run: |
+          uv run --no-sync python - <<'PYTHON'
+          from pathlib import Path
+          import subprocess
+          provider = Path("litellm/llms/webiq/search/transformation.py")
+          registry = Path("litellm/utils.py")
+          cases = (
+              (provider, '"x-apikey": resolved_key', '"x-wrong-key": resolved_key', "test_search_maps_request_and_preserves_sources"),
+              (provider, '"maxResults": optional_params.get("max_results")', '"maxResults": None', "test_search_maps_request_and_preserves_sources"),
+              (provider, "snippet=result.content", "snippet=result.title", "test_search_maps_request_and_preserves_sources"),
+              (registry, "SearchProviders.WEBIQ: WebIQSearchConfig,", "", "test_search_maps_request_and_preserves_sources"),
+          )
+          for path, original_text, replacement, test in cases:
+              source = path.read_text()
+              assert source.count(original_text) == 1
+              try:
+                  path.write_text(source.replace(original_text, replacement))
+                  result = subprocess.run(["uv", "run", "--no-sync", "pytest", f"tests/unit/llms/webiq/search/test_transformation.py::{test}", "-q", "--tb=short"], check=False)
+                  assert result.returncode == 1, f"Mutation not killed: {original_text} ({result.returncode})"
+                  print(f"Killed mutation: {original_text}", flush=True)
+              finally:
+                  path.write_text(source)
+          subprocess.run(["uv", "run", "--no-sync", "pytest", "tests/unit/llms/webiq/search", "-q"], check=True)
+          PYTHON
+      - name: Provider catalog and focused lint
+        run: |
+          uv run --no-sync python tests/code_coverage_tests/check_provider_folders_documented.py
+          uv run --no-sync ruff check --config ruff-strict.toml litellm/llms/webiq
+          uv run --no-sync ruff check --config ruff-tests.toml tests/unit/llms/webiq
+          uv run --no-sync ruff format --check litellm/llms/webiq tests/unit/llms/webiq
+          git diff --exit-code
