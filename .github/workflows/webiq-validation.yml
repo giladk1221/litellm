@@ -26,7 +26,7 @@ jobs:
       - name: Identify tested revision
         run: git rev-parse HEAD
       - name: Install locked dependencies
-        run: uv sync --frozen --extra proxy --group proxy-dev
+        run: uv sync --frozen --extra proxy --group proxy-dev --group ci
       - name: Reproduce socket-policy failures then restore fix
         run: |
           uv run --no-sync python - <<'PYTHON'
