@@ -27,39 +27,50 @@ jobs:
         run: git rev-parse HEAD
       - name: Install locked dependencies
         run: uv sync --frozen --extra proxy --group proxy-dev
-      - name: Provider tests
-        run: uv run --no-sync pytest tests/unit/llms/webiq/search -v --cov=litellm.llms.webiq --cov-report=term-missing
-      - name: Existing search interception regressions
-        run: uv run --no-sync pytest tests/test_litellm/integrations/websearch_interception -q --maxfail=3
-      - name: Targeted mutation checks
+      - name: Reproduce socket-policy failures then restore fix
         run: |
           uv run --no-sync python - <<'PYTHON'
           from pathlib import Path
           import subprocess
-          provider = Path("litellm/llms/webiq/search/transformation.py")
-          registry = Path("litellm/utils.py")
-          cases = (
-              (provider, '"x-apikey": resolved_key', '"x-wrong-key": resolved_key', "test_search_maps_request_and_preserves_sources"),
-              (provider, '"maxResults": optional_params.get("max_results")', '"maxResults": None', "test_search_maps_request_and_preserves_sources"),
-              (provider, "snippet=result.content", "snippet=result.title", "test_search_maps_request_and_preserves_sources"),
-              (registry, "SearchProviders.WEBIQ: WebIQSearchConfig,", "", "test_search_maps_request_and_preserves_sources"),
-          )
-          for path, original_text, replacement, test in cases:
-              source = path.read_text()
-              assert source.count(original_text) == 1
-              try:
-                  path.write_text(source.replace(original_text, replacement))
-                  result = subprocess.run(["uv", "run", "--no-sync", "pytest", f"tests/unit/llms/webiq/search/test_transformation.py::{test}", "-q", "--tb=short"], check=False)
-                  assert result.returncode == 1, f"Mutation not killed: {original_text} ({result.returncode})"
-                  print(f"Killed mutation: {original_text}", flush=True)
-              finally:
-                  path.write_text(source)
-          subprocess.run(["uv", "run", "--no-sync", "pytest", "tests/unit/llms/webiq/search", "-q"], check=True)
+          path = Path("tests/unit/conftest.py")
+          source = path.read_text()
+          fixed = 'LOOPBACK_HOSTS: Final = ["127.0.0.1", "::1", "localhost"]'
+          broken = 'LOOPBACK_HOSTS: Final = ["127.0.0.1", "::1"]'
+          assert source.count(fixed) == 1
+          try:
+              path.write_text(source.replace(fixed, broken))
+              regression = subprocess.run(["uv", "run", "--no-sync", "pytest", "tests/unit/test_socket_policy.py", "-q", "--tb=short"], capture_output=True, text=True)
+              print(regression.stdout, regression.stderr, flush=True)
+              assert regression.returncode == 1
+              assert "SocketConnectBlockedError" in regression.stdout + regression.stderr
+              assert "1 failed, 2 passed" in regression.stdout
+              parallel = subprocess.run(["uv", "run", "--no-sync", "pytest", "tests/unit/llms/webiq", "-n", "2", "--dist=loadscope", "-q", "--tb=short"], capture_output=True, text=True)
+              print(parallel.stdout, parallel.stderr, flush=True)
+              assert parallel.returncode == 3
+              assert "SocketConnectBlockedError" in parallel.stdout + parallel.stderr
+              assert 'host "localhost"' in parallel.stdout + parallel.stderr
+          finally:
+              path.write_text(source)
           PYTHON
+      - name: Run provider and socket-policy tests with two workers
+        run: |
+          uv run --no-sync pytest tests/unit/llms/webiq tests/unit/test_socket_policy.py -n 2 --dist=loadscope -v --reruns 0 --timeout=60 --cov=litellm.llms.webiq --cov-report=term-missing --junitxml=webiq-parallel.xml
+          uv run --no-sync python - <<'PYTHON'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("webiq-parallel.xml").getroot().find("testsuite")
+          assert suite is not None
+          assert int(suite.attrib["tests"]) == 30, suite.attrib
+          assert all(int(suite.attrib[name]) == 0 for name in ("failures", "errors", "skipped")), suite.attrib
+          print("Verified 30 executed tests, no skips, failures, or errors")
+          PYTHON
+      - name: Workflow startup safety
+        run: uv run --no-sync python tests/code_coverage_tests/check_workflow_startup_safety.py
       - name: Provider catalog and focused lint
         run: |
           uv run --no-sync python tests/code_coverage_tests/check_provider_folders_documented.py
           uv run --no-sync ruff check --config ruff-strict.toml litellm/llms/webiq
-          uv run --no-sync ruff check --config ruff-tests.toml tests/unit/llms/webiq
+          uv run --no-sync ruff check --config ruff-tests.toml tests/unit/llms/webiq tests/unit/conftest.py tests/unit/test_socket_policy.py
           uv run --no-sync ruff format --check litellm/llms/webiq tests/unit/llms/webiq
           git diff --exit-code
+      - name: Repository checks
+        run: make check
