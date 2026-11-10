@@ -1,0 +1,56 @@
+[
+  {
+    "case": "discovery",
+    "status": "200",
+    "curl_exit": 0,
+    "webiq": [
+      {
+        "provider_name": "webiq",
+        "ui_friendly_name": "Microsoft Web IQ"
+      }
+    ]
+  },
+  {
+    "case": "versioned-search",
+    "status": "200",
+    "curl_exit": 0,
+    "object": "search",
+    "results": 3,
+    "sources": [
+      {
+        "title": "Microsoft Web IQ documentation | Microsoft Learn",
+        "url": "https://learn.microsoft.com/en-us/web-iq/",
+        "has_passage": true
+      },
+      {
+        "title": "Get Started | Microsoft Web IQ",
+        "url": "https://webiq.microsoft.ai/documentation/",
+        "has_passage": true
+      },
+      {
+        "title": "Documentaci\u00f3n de Microsoft Web IQ | Microsoft Learn",
+        "url": "https://learn.microsoft.com/es-es/web-iq/",
+        "has_passage": true
+      }
+    ]
+  },
+  {
+    "case": "body-search",
+    "status": "200",
+    "curl_exit": 0,
+    "object": "search",
+    "results": 2,
+    "sources": [
+      {
+        "title": "Microsoft Web IQ documentation | Microsoft Learn",
+        "url": "https://learn.microsoft.com/en-us/web-iq/",
+        "has_passage": true
+      },
+      {
+        "title": "Get Started | Microsoft Web IQ",
+        "url": "https://webiq.microsoft.ai/documentation/",
+        "has_passage": true
+      }
+    ]
+  }
+]

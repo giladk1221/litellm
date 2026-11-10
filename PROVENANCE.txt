@@ -1,0 +1,9 @@
+WebIQ PR #50883 live QA, November 10, 2026
+Before: 433163a8e29bcd01998d5c8e0b8260bb0c542d83
+After: 25911f3f3763777b11cde2d5a94292f41a9630eb
+Docker runtime: ghcr.io/berriai/litellm:v1.108.0, linux/amd64
+Native extension: main CI run 42783705833, artifact rust-bridge-42783705833-1
+Same dedicated Redis 7.4.2, Postgres 16 and QA config for both proxies.
+UI screenshots use the runtime bundled dashboard; no dashboard source changes in the PR.
+Screenshots are unmodified captures from http://localhost:4403/ui/search-tools/.
+No mocks used in these live requests.

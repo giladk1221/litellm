@@ -1,0 +1,30 @@
+[
+  {
+    "case": "discovery",
+    "status": "200",
+    "curl_exit": 0,
+    "webiq": []
+  },
+  {
+    "case": "versioned-search",
+    "status": "500",
+    "curl_exit": 0,
+    "error": {
+      "message": "litellm.APIConnectionError: 'webiq' is not a valid SearchProviders",
+      "type": "internal_server_error",
+      "param": null,
+      "code": "500"
+    }
+  },
+  {
+    "case": "body-search",
+    "status": "500",
+    "curl_exit": 0,
+    "error": {
+      "message": "litellm.APIConnectionError: 'webiq' is not a valid SearchProviders",
+      "type": "internal_server_error",
+      "param": null,
+      "code": "500"
+    }
+  }
+]
