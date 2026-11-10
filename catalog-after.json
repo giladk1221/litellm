@@ -1,0 +1,11 @@
+{
+  "status": 200,
+  "endpoint": "/public/endpoints",
+  "search_endpoint": "/search",
+  "webiq": [
+    {
+      "slug": "webiq",
+      "display_name": "Microsoft Web IQ"
+    }
+  ]
+}

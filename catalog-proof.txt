@@ -1,0 +1,9 @@
+Public catalog proof for PR #50883
+Before: 4574b92e2c80616c9ed17ebedd649cc3142e7e70
+After: 2b054d57899fc5758361c8f48045ae15daab331d
+GET http://localhost:4403/public/endpoints
+Before HTTP 200, no WebIQ search provider. After HTTP 200, Microsoft Web IQ is listed for /search.
+Same two-worker proxy and dedicated Redis. No provider credentials or external search calls used.
+The regression test failed before the fix. After the fix, 712 focused tests and 8 generator tests passed.
+The exact CI catalog freshness check passed. Both metadata and endpoint catalog pairs are synchronized.
+The existing real search screenshots remain from 4574b92e2, since this change only updates discovery metadata and a regression test. No search request, authentication, transformation, or dashboard code changed.
