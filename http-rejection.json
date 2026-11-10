@@ -1,0 +1,1 @@
+{"error":{"message":"litellm.APIConnectionError: Microsoft Web IQ search requires an HTTPS api_base","type":"internal_server_error","param":null,"code":"500"}}

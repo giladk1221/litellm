@@ -4,6 +4,11 @@ search_tools:
     litellm_params:
       search_provider: webiq
       api_key: os.environ/WEBIQ_API_KEY
+  - search_tool_name: webiq-http-blocked
+    litellm_params:
+      search_provider: webiq
+      api_key: qa-not-a-real-key
+      api_base: http://api.microsoft.ai/v3
 router_settings:
   redis_host: webiq-refresh-redis
   redis_port: 6379
