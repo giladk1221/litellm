@@ -1,5 +1,6 @@
 name: Copilot document regression QA
 on:
+  workflow_dispatch:
   push:
     branches: [qa_copilot_text_documents_20261122]
 permissions:
