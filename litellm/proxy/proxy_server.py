@@ -2203,6 +2203,13 @@ async def _proxy_lifespan(app: FastAPI, resources: AsyncExitStack) -> AsyncGener
                 try:
                     await admin_mcp_stack.enter_async_context(admin_mcp_lifespan(app))
                     await setup_proxy_callbacks(app, startup_callbacks)
+                    from litellm.proxy.claude_forward_proxy.server import forward_proxy_lifespan
+
+                    if general_settings.get("claude_forward_proxy") is not None and not master_key:
+                        raise ValueError("claude_forward_proxy requires LiteLLM master-key authentication")
+                    await admin_mcp_stack.enter_async_context(
+                        forward_proxy_lifespan(app, general_settings.get("claude_forward_proxy"), state)
+                    )
                     gc.freeze()
                     verbose_proxy_logger.warning("gc.freeze pinned %d startup objects", gc.get_freeze_count())
                     yield state

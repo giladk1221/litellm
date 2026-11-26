@@ -46,6 +46,7 @@ from litellm.litellm_core_utils.initialize_dynamic_callback_params import (
 )
 from litellm.models.budget import BudgetLimitList, BudgetLimits, BudgetRolloverCap
 from litellm.proxy.auth.access_group_rules import AccessGroupRule, _validate_rules
+from litellm.proxy.claude_forward_proxy.settings import ClaudeForwardProxySettings
 from litellm.proxy.mcp_server.stdio_gate import MCP_STDIO_DISABLED_MESSAGE, is_mcp_stdio_enabled
 from litellm.types.agents import (
     AgentCaller as AgentCaller,  # noqa: PLC0414  # public re-export
@@ -2636,6 +2637,11 @@ class ConfigGeneralSettings(LiteLLMPydanticObjectBase):
     """
     Documents all the fields supported by `general_settings` in config.yaml
     """
+
+    claude_forward_proxy: "ClaudeForwardProxySettings | None" = Field(
+        None,
+        description="Opt-in HTTPS forward proxy for Claude subscription clients. Requires Python 3.11 and a trusted inspection certificate.",
+    )
 
     ldap_sync: LDAPSyncSettings | None = Field(
         None,
