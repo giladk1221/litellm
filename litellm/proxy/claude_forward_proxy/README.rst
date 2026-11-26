@@ -55,10 +55,6 @@ Add this configuration to the existing proxy configuration::
         listener_certificate: /etc/litellm/tls/proxy-server.pem
         listener_private_key: /etc/litellm/tls/proxy-server.key
         connection_lifetime_seconds: 3600
-        service_paths:
-          - /api/oauth/
-          - /api/claude_code/
-          - /api/event_logging/
 
 The inspection certificate must cover api.anthropic.com and chain to a CA
 trusted by the Claude Code process. The listener certificate must cover the
@@ -122,6 +118,9 @@ by this HTTPS-only listener.
 
 service_paths replaces the default API-host service allowlist. A trailing slash
 permits a path prefix. Other entries match an exact path, ignoring its query.
+The defaults cover OAuth, CLI bootstrap and policy, feature evaluation, organization
+model discovery, telemetry, MCP discovery, environments and sessions. Session and
+environment routes are native control-plane services, not local Messages inference.
 Unknown paths return 403. Enable debug logging to identify a denied path without
 logging its query or payload, review its purpose, and update this configuration.
 Do not approve inference endpoints as service paths. Known alternative inference

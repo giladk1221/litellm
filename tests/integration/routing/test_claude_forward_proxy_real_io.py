@@ -219,7 +219,21 @@ async def test_inference_preserves_oauth_payload_headers_and_incremental_streami
 
 @pytest.mark.parametrize(
     "path",
-    ["/api/oauth/usage", "/api/oauth/profile", "/api/claude_code/environments", "/api/event_logging/v2/batch"],
+    [
+        "/api/oauth/usage",
+        "/api/oauth/profile",
+        "/api/claude_code/environments",
+        "/api/event_logging/v2/batch",
+        "/api/claude_cli/bootstrap",
+        "/api/claude_code_penguin_mode",
+        "/api/eval/test-sdk",
+        "/api/organizations/test-org/model_selector/cc",
+        "/mcp-registry/v0/servers",
+        "/v1/mcp_servers",
+        "/v1/environments/bridge",
+        "/v1/environments",
+        "/v1/sessions",
+    ],
 )
 async def test_feature_services_keep_native_credentials_and_never_receive_gateway_keys(
     running: Running, path: str

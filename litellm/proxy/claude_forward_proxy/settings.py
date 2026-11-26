@@ -33,7 +33,22 @@ class ClaudeForwardProxySettings(BaseModel):
     max_connections: int = Field(default=256, ge=1)
     connection_lifetime_seconds: float = Field(default=3600, gt=0)
     shutdown_timeout_seconds: float = Field(default=30, ge=0)
-    service_paths: tuple[str, ...] = ("/api/oauth/", "/api/claude_code/", "/api/event_logging/")
+    service_paths: tuple[str, ...] = (
+        "/api/oauth/",
+        "/api/claude_code/",
+        "/api/claude_cli/",
+        "/api/claude_code_penguin_mode",
+        "/api/eval/",
+        "/api/organizations/",
+        "/api/event_logging/",
+        "/mcp-registry/v0/servers",
+        "/v1/mcp_servers",
+        "/v1/mcp_servers/",
+        "/v1/environments",
+        "/v1/environments/",
+        "/v1/sessions",
+        "/v1/sessions/",
+    )
 
     @model_validator(mode="after")
     def validate_listener(self) -> "ClaudeForwardProxySettings":
