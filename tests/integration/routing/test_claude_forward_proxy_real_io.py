@@ -233,6 +233,8 @@ async def test_inference_preserves_oauth_payload_headers_and_incremental_streami
         "/v1/environments/bridge",
         "/v1/environments",
         "/v1/sessions",
+        "/v1/code/sessions",
+        "/v1/code/sessions/test-session/worker/register",
     ],
 )
 async def test_feature_services_keep_native_credentials_and_never_receive_gateway_keys(

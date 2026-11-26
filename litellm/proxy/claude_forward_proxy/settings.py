@@ -48,6 +48,8 @@ class ClaudeForwardProxySettings(BaseModel):
         "/v1/environments/",
         "/v1/sessions",
         "/v1/sessions/",
+        "/v1/code/sessions",
+        "/v1/code/sessions/",
     )
 
     @model_validator(mode="after")
