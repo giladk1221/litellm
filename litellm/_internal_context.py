@@ -45,6 +45,21 @@ _nested_tool_call_failure: Final[ContextVar[bool]] = ContextVar("nested_tool_cal
 
 _request_parent_otel_span: Final[ContextVar[Span | None]] = ContextVar("request_parent_otel_span", default=None)
 
+_anthropic_subscription_token: Final[ContextVar[str | None]] = ContextVar("anthropic_subscription_token", default=None)
+
+
+@contextmanager
+def native_anthropic_subscription(token: str) -> Generator[None]:
+    previous: Final = _anthropic_subscription_token.set(token)
+    try:
+        yield
+    finally:
+        _anthropic_subscription_token.reset(previous)
+
+
+def native_anthropic_subscription_token() -> str | None:
+    return _anthropic_subscription_token.get()
+
 
 @contextmanager
 def internal_sub_call(parent_request_id: str | None = None) -> Generator[None]:

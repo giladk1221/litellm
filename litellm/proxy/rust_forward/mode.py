@@ -86,6 +86,11 @@ def environment_error(error: ValidationError) -> str:
     )
 
 
+def validate_claude_listener_runtime(environ: Mapping[str, str]) -> None:
+    if rust_forward_mode(environ) is not Mode.DISABLED:
+        raise ValueError("claude_forward_proxy is not supported with LITELLM_RUST_FIRST")
+
+
 # A supervised server's TCP peer is always Rust on loopback, so server-level proxy headers would trust any
 # client's forwarding headers. They stay off there and ``peer.wrap`` applies the operator's trust instead.
 

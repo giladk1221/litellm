@@ -2205,10 +2205,14 @@ async def _proxy_lifespan(app: FastAPI, resources: AsyncExitStack) -> AsyncGener
                     await setup_proxy_callbacks(app, startup_callbacks)
                     from litellm.proxy.claude_forward_proxy.server import forward_proxy_lifespan
 
-                    if general_settings.get("claude_forward_proxy") is not None and not master_key:
-                        raise ValueError("claude_forward_proxy requires LiteLLM master-key authentication")
                     await admin_mcp_stack.enter_async_context(
-                        forward_proxy_lifespan(app, general_settings.get("claude_forward_proxy"), state)
+                        forward_proxy_lifespan(
+                            app,
+                            general_settings.get("claude_forward_proxy"),
+                            state,
+                            authenticated=bool(master_key),
+                            credential_header=general_settings.get("litellm_key_header_name"),
+                        )
                     )
                     gc.freeze()
                     verbose_proxy_logger.warning("gc.freeze pinned %d startup objects", gc.get_freeze_count())
@@ -16636,6 +16640,10 @@ async def _count_request_tokens(
     tools: Final = request.tools
     system: Final = request.system
     routed: Final = count_route.deployment
+
+    from litellm.proxy.claude_forward_proxy.inference_policy import validate_native_target
+
+    validate_native_target(_LITELLM_PARAMS_COPY.validate_python((routed or {}).get("litellm_params", {})))
 
     deployment: dict[str, object] | None = None if routed is None else dict(routed)
     litellm_model_name = None

@@ -44,6 +44,7 @@ from starlette.types import Message
 
 import litellm
 from litellm import Router
+from litellm._internal_context import native_anthropic_subscription
 from litellm._logging import JsonFormatter, verbose_logger, verbose_proxy_logger
 from litellm.litellm_core_utils.get_model_cost_map import (
     GetModelCostMap,
@@ -88,6 +89,8 @@ from litellm.proxy.common_utils.token_count_settings import (
 )
 from litellm.proxy.google_endpoints.endpoints import _google_count_tokens_request
 from litellm.proxy.proxy_server import (
+    CountRoute,
+    _count_request_tokens,
     _estimate_or_provider_error,
     _provider_token_count,
     _try_provider_token_count,
@@ -8925,3 +8928,32 @@ async def test_utils_token_counter_counts_a_bare_prompt_with_a_tool_choice_like_
     )
 
     assert (with_choice.error, with_choice.total_tokens) == (False, prompt_alone.total_tokens)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"model": "openai/test"},
+        {"model": "anthropic/test", "api_base": "https://unapproved.invalid"},
+        {"model": "anthropic/test", "api_key": "server-owned-test-key"},
+    ],
+)
+async def test_native_subscription_token_count_rejects_non_subscription_deployments(
+    params: Mapping[str, object],
+) -> None:
+    route: Final = CountRoute(served="test", select_request={}, routable=(), deployment={"litellm_params": params})
+    with native_anthropic_subscription("sk-ant-oat01-test-only"):
+        with pytest.raises(litellm.BadRequestError, match="Native Claude inference"):
+            await _count_request_tokens(
+                request=TokenCountRequest(model="test", messages=[{"role": "user", "content": "test"}]),
+                count_route=route,
+                call_endpoint=True,
+                messages_format="anthropic",
+                output_format=None,
+                context_management=None,
+                request_litellm_params={},
+                responses_request=None,
+                client_oauth_token="sk-ant-oat01-test-only",
+                count_options={},
+            )

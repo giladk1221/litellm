@@ -8,7 +8,12 @@ from typing import Final
 import h11
 from anyio import fail_after
 
+from litellm.types.proxy.auth.special_headers import SpecialHeaders
+
 HEAD_LIMIT: Final = 65536
+GATEWAY_HEADERS: Final = frozenset(
+    name.encode("ascii") for name in SpecialHeaders.litellm_credential_header_names() if name != "authorization"
+)
 HOP_HEADERS: Final = frozenset(
     (
         b"connection",
@@ -41,7 +46,9 @@ def gateway_key(headers: Iterable[tuple[bytes, bytes]]) -> str | None:
     return password
 
 
-def clean_headers(headers: Iterable[tuple[bytes, bytes]]) -> tuple[tuple[bytes, bytes], ...]:
+def clean_headers(
+    headers: Iterable[tuple[bytes, bytes]], credential_headers: frozenset[bytes] = GATEWAY_HEADERS
+) -> tuple[tuple[bytes, bytes], ...]:
     source: Final = tuple(headers)
     connection_tokens: Final = frozenset(
         token.strip().lower()
@@ -50,7 +57,7 @@ def clean_headers(headers: Iterable[tuple[bytes, bytes]]) -> tuple[tuple[bytes, 
     return tuple(
         (name, value)
         for name, value in source
-        if name not in HOP_HEADERS | connection_tokens and not name.startswith(b"x-litellm-")
+        if name not in HOP_HEADERS | connection_tokens | credential_headers and not name.startswith(b"x-litellm-")
     )
 
 

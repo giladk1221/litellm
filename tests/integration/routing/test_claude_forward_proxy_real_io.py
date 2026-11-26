@@ -19,8 +19,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 from starlette.types import Receive, Scope, Send
 
-from litellm.proxy.claude_forward_proxy.protocol import HTTPConnection
-from litellm.proxy.claude_forward_proxy.server import ClaudeForwardProxy, forward_proxy_lifespan
+from litellm.proxy.claude_forward_proxy.protocol import GATEWAY_HEADERS, HTTPConnection
+from litellm.proxy.claude_forward_proxy.server import ClaudeForwardProxy, duplex, forward_proxy_lifespan
 from litellm.proxy.claude_forward_proxy.settings import ClaudeForwardProxySettings
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -161,8 +161,14 @@ async def running(
     async def connector(hostname: str, encrypted: bool) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         return await asyncio.open_connection("127.0.0.1", service.sockets[0].getsockname()[1])
 
-    settings: Final = ClaudeForwardProxySettings(certificate=certificate, private_key=key, max_body_bytes=1024)
-    proxy: Final = ClaudeForwardProxy(app, settings, connector)
+    settings: Final = ClaudeForwardProxySettings(
+        enabled=True,
+        certificate=certificate,
+        private_key=key,
+        max_body_bytes=1024,
+        service_paths=(*ClaudeForwardProxySettings().service_paths, "/api/voice"),
+    )
+    proxy: Final = ClaudeForwardProxy(app, settings, connector, GATEWAY_HEADERS | {b"x-gateway-key"})
     secure: Final = getattr(request, "param", False) is True
     server: Final = await asyncio.start_server(
         proxy.accept, "127.0.0.1", 0, ssl=proxy.inspection_tls if secure else None
@@ -204,7 +210,10 @@ async def test_inference_preserves_oauth_payload_headers_and_incremental_streami
             assert await anext(chunks) == b"event: message_stop\ndata: {}\n\n"
 
 
-@pytest.mark.parametrize("path", ["/api/oauth/usage", "/v1/messages/count_tokens", "/api/claude_code/environments"])
+@pytest.mark.parametrize(
+    "path",
+    ["/api/oauth/usage", "/api/oauth/profile", "/api/claude_code/environments", "/api/event_logging/v2/batch"],
+)
 async def test_feature_services_keep_native_credentials_and_never_receive_gateway_keys(
     running: Running, path: str
 ) -> None:
@@ -212,7 +221,14 @@ async def test_feature_services_keep_native_credentials_and_never_receive_gatewa
         response: Final = await client.post(
             "https://api.anthropic.com" + path,
             content=b"{}",
-            headers={"Authorization": OAUTH, "x-litellm-api-key": "untrusted"},
+            headers={
+                "Authorization": OAUTH,
+                "x-litellm-api-key": "untrusted",
+                "API-Key": "gateway-secret",
+                "x-goog-api-key": "gateway-secret",
+                "Ocp-Apim-Subscription-Key": "gateway-secret",
+                "x-gateway-key": "gateway-secret",
+            },
         )
     assert response.json() == {"service": "native"}
     assert response.headers["anthropic-feature"] == "native"
@@ -222,6 +238,7 @@ async def test_feature_services_keep_native_credentials_and_never_receive_gatewa
     assert dict(request.headers)[b"authorization"] == OAUTH.encode()
     assert b"x-litellm-api-key" not in dict(request.headers)
     assert b"proxy-authorization" not in dict(request.headers)
+    assert b"gateway-secret" not in b" ".join(value for _, value in request.headers)
     assert running.app.requests.empty()
 
 
@@ -303,8 +320,10 @@ async def test_lifespan_shuts_down_active_connections_and_releases_port(
 ) -> None:
     certificate, key, _ = certificates
     app: Final = Application()
-    settings: Final = ClaudeForwardProxySettings(certificate=certificate, private_key=key, port=unused_tcp_port)
-    async with forward_proxy_lifespan(app, settings, {}):
+    settings: Final = ClaudeForwardProxySettings(
+        enabled=True, certificate=certificate, private_key=key, port=unused_tcp_port
+    )
+    async with forward_proxy_lifespan(app, settings, {}, authenticated=True):
         reader, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
         writer.write(b"CONNECT ")
         await writer.drain()
@@ -315,6 +334,81 @@ async def test_lifespan_shuts_down_active_connections_and_releases_port(
             await asyncio.open_connection("127.0.0.1", unused_tcp_port)
     finally:
         writer.close()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_disabled_listener_needs_no_credentials_or_certificates(explicit: bool, unused_tcp_port: int) -> None:
+    app: Final = Application()
+    configured: Final = (
+        {"enabled": False, "certificate": "/does-not-exist", "port": unused_tcp_port}
+        if explicit
+        else {"port": unused_tcp_port}
+    )
+    async with forward_proxy_lifespan(app, configured, {}, authenticated=False):
+        with pytest.raises(ConnectionRefusedError):
+            await asyncio.open_connection("127.0.0.1", unused_tcp_port)
+    assert app.requests.empty()
+
+
+async def test_enabled_listener_refuses_unauthenticated_gateway(
+    certificates: tuple[str, str, ssl.SSLContext], unused_tcp_port: int
+) -> None:
+    certificate, key, _ = certificates
+    settings: Final = ClaudeForwardProxySettings(
+        enabled=True, certificate=certificate, private_key=key, port=unused_tcp_port
+    )
+    with pytest.raises(ValueError, match="master-key authentication"):
+        async with forward_proxy_lifespan(Application(), settings, {}, authenticated=False):
+            pytest.fail("Unauthenticated listener started")
+    with pytest.raises(ConnectionRefusedError):
+        await asyncio.open_connection("127.0.0.1", unused_tcp_port)
+
+
+@pytest.mark.parametrize("path", ["/v2/messages", "/v1/new-inference", "/api/unapproved", "/api/oauth-evil/usage"])
+async def test_unclassified_service_routes_fail_closed(running: Running, path: str) -> None:
+    async with running.client() as client:
+        response: Final = await client.post("https://api.anthropic.com" + path, content=b"{}")
+    assert response.status_code == 403
+    assert running.app.requests.empty()
+    assert running.upstream.empty()
+
+
+async def test_token_count_uses_gateway_authentication_and_model_pipeline(running: Running) -> None:
+    running.app.release_stream.set()
+    async with running.client() as client:
+        response: Final = await client.post(
+            "https://api.anthropic.com/v1/messages/count_tokens",
+            content=b'{"model":"claude-test","messages":[]}',
+            headers={"Authorization": OAUTH, "X-Forwarded-For": "203.0.113.9", "Forwarded": "for=203.0.113.9"},
+        )
+    assert response.status_code == 200
+    scope, body = await running.app.requests.get()
+    assert scope["path"] == "/v1/messages/count_tokens"
+    assert b"claude-test" in body
+    assert b"x-forwarded-for" not in dict(scope["headers"])
+    assert b"forwarded" not in dict(scope["headers"])
+    assert running.upstream.empty()
+
+
+async def test_connection_lifetime_bounds_incomplete_client_requests(
+    certificates: tuple[str, str, ssl.SSLContext], unused_tcp_port: int
+) -> None:
+    certificate, key, _ = certificates
+    settings: Final = ClaudeForwardProxySettings(
+        enabled=True,
+        certificate=certificate,
+        private_key=key,
+        port=unused_tcp_port,
+        connection_lifetime_seconds=0.05,
+    )
+    async with forward_proxy_lifespan(Application(), settings, {}, authenticated=True):
+        reader, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
+        try:
+            writer.write(b"CONNECT ")
+            await writer.drain()
+            assert await asyncio.wait_for(reader.read(), 2) == b""
+        finally:
+            writer.close()
 
 
 async def test_feature_websocket_upgrade_retains_bidirectional_bytes(running: Running) -> None:
@@ -330,6 +424,39 @@ async def test_feature_websocket_upgrade_retains_bidirectional_bytes(running: Ru
         assert await asyncio.wait_for(reader.readexactly(4), 2) == b"test"
     finally:
         writer.close()
+
+
+async def test_one_way_activity_keeps_a_duplex_tunnel_open() -> None:
+    connections: Final[asyncio.Queue[tuple[asyncio.StreamReader, asyncio.StreamWriter]]] = asyncio.Queue()
+    server: Final = await asyncio.start_server(
+        lambda reader, writer: connections.put_nowait((reader, writer)), "127.0.0.1", 0
+    )
+    port: Final = server.sockets[0].getsockname()[1]
+    client_reader, client_writer = await asyncio.open_connection("127.0.0.1", port)
+    upstream_reader, upstream_writer = await asyncio.open_connection("127.0.0.1", port)
+    left, left_writer = await connections.get()
+    right, right_writer = await connections.get()
+    tunnel: Final = asyncio.create_task(duplex(left, left_writer, right, right_writer, timeout=0.5))
+    try:
+        for _ in range(8):
+            upstream_writer.write(b"ping")
+            await upstream_writer.drain()
+            assert await asyncio.wait_for(client_reader.readexactly(4), 1) == b"ping"
+            await asyncio.sleep(0.1)
+        client_writer.write(b"pong")
+        await client_writer.drain()
+        assert await asyncio.wait_for(upstream_reader.readexactly(4), 1) == b"pong"
+        done, _ = await asyncio.wait((tunnel,), timeout=2)
+        assert tunnel in done
+        with pytest.raises(TimeoutError):
+            await tunnel
+    finally:
+        tunnel.cancel()
+        await asyncio.gather(tunnel, return_exceptions=True)
+        for writer in (client_writer, upstream_writer, left_writer, right_writer):
+            writer.close()
+        server.close()
+        await server.wait_closed()
 
 
 @pytest.mark.parametrize("destination", ["127.0.0.1:443", "api.anthropic.com:80", "api.anthropic.com.evil.test:443"])

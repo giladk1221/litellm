@@ -577,6 +577,7 @@ jobs:
               --ignore=tests/unit/proxy/google_endpoints/test_google_gemini_proxy_request.py
               --ignore=tests/unit/proxy/public_endpoints/test_blog_posts_endpoint.py
               tests/unit/proxy/anthropic_endpoints
+              tests/unit/proxy/claude_forward_proxy
               tests/unit/proxy/google_endpoints
               tests/unit/proxy/container_endpoints
               tests/unit/proxy/fine_tuning_endpoints

@@ -19,6 +19,7 @@ from pydantic import BeforeValidator, ConfigDict, Field, JsonValue, StrictBool, 
 from typing_extensions import ReadOnly, TypedDict
 
 import litellm
+from litellm._internal_context import native_anthropic_subscription_token
 from litellm.constants import (
     ANTHROPIC_COMPATIBLE_MAX_USER_ID_LENGTH,
     ANTHROPIC_MAX_USER_ID_LENGTH,
@@ -28,7 +29,7 @@ from litellm.constants import (
     DEFAULT_REASONING_EFFORT_XHIGH_THINKING_BUDGET,
     DROP_UNSUPPORTED_PARAMS_HINT,
 )
-from litellm.exceptions import UnsupportedParamsError
+from litellm.exceptions import BadRequestError, UnsupportedParamsError
 from litellm.litellm_core_utils.core_helpers import (
     as_object_list,
     as_str_mapping,
@@ -1842,7 +1843,30 @@ class AnthropicModelInfo(BaseLLMModelInfo):
 
     @staticmethod
     def get_api_base(api_base: str | None = None) -> str | None:
-        return AnthropicModelInfo.resolve_anthropic_api_base(api_base)
+        resolved: Final = AnthropicModelInfo.resolve_anthropic_api_base(api_base)
+        if native_anthropic_subscription_token() is not None and not AnthropicModelInfo.is_subscription_origin(resolved):
+            raise BadRequestError(
+                message="Native Claude inference requires the Anthropic API origin",
+                model="",
+                llm_provider="anthropic",
+            )
+        return resolved
+
+    @staticmethod
+    def is_subscription_origin(api_base: str) -> bool:
+        try:
+            url: Final = httpx.URL(api_base)
+        except httpx.InvalidURL:
+            return False
+        return (
+            url.scheme == "https"
+            and url.host == "api.anthropic.com"
+            and url.port in (None, 443)
+            and not url.userinfo
+            and not url.query
+            and not url.fragment
+            and url.path in ("", "/", "/v1", "/v1/")
+        )
 
     @staticmethod
     def get_api_key(api_key: str | None = None) -> str | None:
@@ -1920,6 +1944,10 @@ class AnthropicModelInfo(BaseLLMModelInfo):
         api_base: str | None,
         use_bearer_for_custom_base: bool,
     ) -> Mapping[str, str] | None:
+        native_token: Final = native_anthropic_subscription_token()
+        if native_token is not None:
+            AnthropicModelInfo.get_api_base(api_base)
+            return AnthropicModelInfo._oauth_bearer_header(native_token)
         resolved_key: Final = AnthropicModelInfo.get_api_key(api_key)
         if resolved_key is not None:
             if is_anthropic_oauth_key(resolved_key):

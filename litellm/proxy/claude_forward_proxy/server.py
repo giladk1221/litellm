@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import os
 import socket
 import ssl
 import sys
@@ -13,14 +14,19 @@ import httpx
 from pydantic import TypeAdapter
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+import litellm
+from litellm._internal_context import native_anthropic_subscription
 from litellm._logging import verbose_proxy_logger
+from litellm.proxy.claude_forward_proxy.inference_policy import NativeInferencePolicy
 from litellm.proxy.claude_forward_proxy.protocol import (
+    GATEWAY_HEADERS,
     HTTPConnection,
     clean_headers,
     gateway_key,
     native_response_headers,
 )
 from litellm.proxy.claude_forward_proxy.settings import ClaudeForwardProxySettings
+from litellm.proxy.rust_forward.mode import validate_claude_listener_runtime
 
 ANTHROPIC_HOST: Final = "api.anthropic.com"
 STATUS_CODE: Final = TypeAdapter(int)
@@ -45,13 +51,22 @@ async def public_connection(hostname: str, encrypted: bool) -> tuple[asyncio.Str
     )
 
 
-async def copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, timeout: float) -> None:
+async def copy_stream(
+    reader: asyncio.StreamReader, writer: asyncio.StreamWriter, timeout: float, activity: asyncio.Event
+) -> None:
     while True:
-        chunk = await asyncio.wait_for(reader.read(65536), timeout=timeout)
+        chunk = await reader.read(65536)
         if not chunk:
             return
         writer.write(chunk)
         await asyncio.wait_for(writer.drain(), timeout=timeout)
+        activity.set()
+
+
+async def idle_connection(activity: asyncio.Event, timeout: float) -> None:
+    while True:
+        activity.clear()
+        await asyncio.wait_for(activity.wait(), timeout=timeout)
 
 
 async def duplex(
@@ -61,9 +76,11 @@ async def duplex(
     right_writer: asyncio.StreamWriter,
     timeout: float,
 ) -> None:
+    activity: Final = asyncio.Event()
     tasks: Final = (
-        asyncio.create_task(copy_stream(left, right_writer, timeout)),
-        asyncio.create_task(copy_stream(right, left_writer, timeout)),
+        asyncio.create_task(copy_stream(left, right_writer, timeout, activity)),
+        asyncio.create_task(copy_stream(right, left_writer, timeout, activity)),
+        asyncio.create_task(idle_connection(activity, timeout)),
     )
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -95,13 +112,17 @@ class ClaudeForwardProxy:
         app: ASGIApp,
         settings: ClaudeForwardProxySettings,
         connector: Connector = public_connection,
+        credential_headers: frozenset[bytes] = GATEWAY_HEADERS,
     ) -> None:
         self.app = app
         self.settings = settings
         self.connector = connector
+        self.credential_headers = credential_headers
         self.connections: frozenset[asyncio.Task[None]] = frozenset()
         self.inspection_tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.inspection_tls.minimum_version = ssl.TLSVersion.TLSv1_2
+        if not settings.enabled or settings.certificate is None or settings.private_key is None:
+            raise ValueError("Claude forward proxy is disabled or has no inspection certificate")
         self.inspection_tls.load_cert_chain(settings.certificate, settings.private_key)
         self.inspection_tls.set_alpn_protocols(["http/1.1"])
         self.auth_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://litellm")
@@ -135,7 +156,7 @@ class ClaudeForwardProxy:
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         connection: Final = HTTPConnection(reader, writer, self.settings.idle_timeout_seconds)
         try:
-            await self.connect(connection)
+            await asyncio.wait_for(self.connect(connection), timeout=self.settings.connection_lifetime_seconds)
         except (OSError, TimeoutError, ValueError, h11.ProtocolError, httpx.HTTPError):
             if connection.state.our_state is h11.SEND_RESPONSE:
                 with suppress(OSError, h11.ProtocolError):
@@ -205,28 +226,33 @@ class ClaudeForwardProxy:
         ):
             await connection.reject(400, b"Ambiguous request path")
             return
-        if path.rstrip(b"/") == b"/v1/messages":
+        if path.rstrip(b"/") in (b"/v1/messages", b"/v1/messages/count_tokens"):
             oauth: Final = headers.get(b"authorization", b"")
             if request.method != b"POST" or not oauth.startswith(b"Bearer sk-ant-oat") or b"x-api-key" in headers:
                 await connection.reject(401, b"Claude subscription OAuth is required")
                 return
-            await self.inference(connection, request, body, key)
+            await self.inference(connection, request, body, key, path.rstrip(b"/"))
             return
-        if (
-            path.startswith((b"/v1/messages/", b"/v1/complete", b"/v1/chat/", b"/v1/responses"))
-            and path != b"/v1/messages/count_tokens"
-        ):
+        if path.startswith((b"/v1/messages/", b"/v1/complete", b"/v1/chat/", b"/v1/responses")):
             await connection.reject(403, b"Inference must use POST /v1/messages")
+            return
+        if not self.settings.permits_service(path):
+            verbose_proxy_logger.debug("Claude native proxy denied service path %r", path)
+            await connection.reject(403, b"Native service path is not approved in claude_forward_proxy.service_paths")
             return
         if not await self.authorized(key):
             await connection.reject(403, b"LiteLLM access revoked")
             return
         await self.service(connection, request, body)
 
-    async def inference(self, connection: HTTPConnection, request: h11.Request, body: bytes, key: str) -> None:
+    async def inference(
+        self, connection: HTTPConnection, request: h11.Request, body: bytes, key: str, route: bytes
+    ) -> None:
         path, _, query = request.target.partition(b"?")
         headers: Final = tuple(
-            (name, value) for name, value in clean_headers(request.headers) if name != b"content-length"
+            (name, value)
+            for name, value in clean_headers(request.headers, self.credential_headers)
+            if name not in (b"content-length", b"forwarded", b"x-forwarded-for", b"x-real-ip", b"cache-control")
         )
         scope: Final[Scope] = {
             "type": "http",
@@ -234,7 +260,7 @@ class ClaudeForwardProxy:
             "http_version": "1.1",
             "method": "POST",
             "scheme": "https",
-            "path": "/v1/messages",
+            "path": route.decode("ascii"),
             "raw_path": path,
             "query_string": query,
             "root_path": "",
@@ -244,6 +270,7 @@ class ClaudeForwardProxy:
                 *headers,
                 (b"content-length", str(len(body)).encode()),
                 (b"x-litellm-api-key", f"Bearer {key}".encode()),
+                (b"cache-control", b"no-cache, no-store"),
             ],
         }
 
@@ -262,14 +289,16 @@ class ClaudeForwardProxy:
                 if not message.get("more_body", False):
                     await connection.send(h11.EndOfMessage())
 
-        await self.app(scope, RequestBody(body, connection.reader).receive, send)
+        oauth: Final = dict(request.headers)[b"authorization"].removeprefix(b"Bearer ").decode("ascii")
+        with native_anthropic_subscription(oauth):
+            await self.app(scope, RequestBody(body, connection.reader).receive, send)
 
     async def service(self, connection: HTTPConnection, request: h11.Request, body: bytes) -> None:
         upstream, upstream_writer = await self.connector(ANTHROPIC_HOST, True)
         state: Final = h11.Connection(h11.CLIENT, max_incomplete_event_size=65536)
         headers: Final = tuple(
             (name, value)
-            for name, value in clean_headers(request.headers)
+            for name, value in clean_headers(request.headers, self.credential_headers)
             if name not in (b"content-length", b"expect")
         )
         upgrade: Final = dict(request.headers).get(b"upgrade")
@@ -324,18 +353,37 @@ class ClaudeForwardProxy:
 
 
 @asynccontextmanager
-async def forward_proxy_lifespan(app: ASGIApp, configured: object, state: Mapping[str, object]) -> AsyncGenerator[None]:
+async def forward_proxy_lifespan(
+    app: ASGIApp,
+    configured: object,
+    state: Mapping[str, object],
+    *,
+    authenticated: bool = False,
+    credential_header: object = None,
+) -> AsyncGenerator[None]:
     if configured is None:
         yield
         return
+    settings: Final = ClaudeForwardProxySettings.model_validate(configured)
+    if not settings.enabled:
+        yield
+        return
+    if not authenticated:
+        raise ValueError("claude_forward_proxy requires LiteLLM master-key authentication")
     if sys.version_info < (3, 11):
         raise RuntimeError("The Claude forward proxy requires Python 3.11 or later")
-    settings: Final = ClaudeForwardProxySettings.model_validate(configured)
+    validate_claude_listener_runtime(os.environ)
 
     async def with_state(scope: Scope, receive: Receive, send: Send) -> None:
         await app({**scope, "state": dict(state)}, receive, send)
 
-    proxy: Final = ClaudeForwardProxy(with_state, settings)
+    custom_headers: Final[frozenset[bytes]] = (
+        frozenset((credential_header.lower().encode("ascii"),))
+        if isinstance(credential_header, str) and credential_header.lower() != "authorization"
+        else frozenset()
+    )
+    proxy: Final = ClaudeForwardProxy(with_state, settings, credential_headers=GATEWAY_HEADERS | custom_headers)
+    policy: Final = NativeInferencePolicy()
     try:
         listener_tls: Final = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER) if settings.listener_certificate else None
         if listener_tls is not None and settings.listener_certificate is not None:
@@ -349,13 +397,21 @@ async def forward_proxy_lifespan(app: ASGIApp, configured: object, state: Mappin
             ssl=listener_tls,
             ssl_handshake_timeout=30 if listener_tls else None,
             reuse_port=sys.platform != "win32",
+            start_serving=False,
         )
     except BaseException:
         await proxy.close()
         raise
     try:
+        litellm.logging_callback_manager.add_litellm_callback(policy)
+        await server.start_serving()
         yield
     finally:
         server.close()
-        await proxy.close()
-        await server.wait_closed()
+        try:
+            await proxy.close()
+            await server.wait_closed()
+        finally:
+            litellm.logging_callback_manager.remove_callback_from_list_by_object(
+                litellm.callbacks, policy, require_self=False
+            )
