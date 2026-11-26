@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager, suppress
 from typing import Final, TypeAlias
 from urllib.parse import unquote_to_bytes
+from uuid import uuid4
 
 import h11
 import httpx
@@ -146,8 +147,10 @@ class ClaudeForwardProxy:
         if not task.cancelled() and (error := task.exception()) is not None:
             verbose_proxy_logger.warning("Claude forward proxy connection failed (%s)", type(error).__name__)
 
-    async def close(self) -> None:
+    async def close(self, grace_period: float = 0) -> None:
         tasks: Final = tuple(self.connections)
+        if tasks and grace_period > 0:
+            await asyncio.wait(tasks, timeout=grace_period)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -249,6 +252,7 @@ class ClaudeForwardProxy:
         self, connection: HTTPConnection, request: h11.Request, body: bytes, key: str, route: bytes
     ) -> None:
         path, _, query = request.target.partition(b"?")
+        call_id: Final = str(uuid4())
         headers: Final = tuple(
             (name, value)
             for name, value in clean_headers(request.headers, self.credential_headers)
@@ -270,6 +274,7 @@ class ClaudeForwardProxy:
                 *headers,
                 (b"content-length", str(len(body)).encode()),
                 (b"x-litellm-api-key", f"Bearer {key}".encode()),
+                (b"x-litellm-call-id", call_id.encode("ascii")),
                 (b"cache-control", b"no-cache, no-store"),
             ],
         }
@@ -290,7 +295,7 @@ class ClaudeForwardProxy:
                     await connection.send(h11.EndOfMessage())
 
         oauth: Final = dict(request.headers)[b"authorization"].removeprefix(b"Bearer ").decode("ascii")
-        with native_anthropic_subscription(oauth):
+        with native_anthropic_subscription(oauth, call_id):
             await self.app(scope, RequestBody(body, connection.reader).receive, send)
 
     async def service(self, connection: HTTPConnection, request: h11.Request, body: bytes) -> None:
@@ -409,7 +414,7 @@ async def forward_proxy_lifespan(
     finally:
         server.close()
         try:
-            await proxy.close()
+            await proxy.close(settings.shutdown_timeout_seconds)
             await server.wait_closed()
         finally:
             litellm.logging_callback_manager.remove_callback_from_list_by_object(

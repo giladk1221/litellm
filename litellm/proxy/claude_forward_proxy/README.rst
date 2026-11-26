@@ -104,6 +104,11 @@ closes inspected connections after each HTTP request. Request bodies are
 bounded at 32 MiB by default. The default is 256 concurrent connections per
 worker with a 120-second idle timeout and a one-hour maximum connection lifetime.
 Activity in either direction keeps a duplex tunnel alive until its lifetime limit.
+shutdown_timeout_seconds defaults to 30 seconds. Shutdown first stops accepting
+connections, then gives existing requests this interval to finish before cancelling
+remaining work. Set the process or pod termination grace period above this interval
+plus the five-second TLS close allowance. Rotate mounted certificates and keys by
+restarting workers, with both old and new CA roots trusted during a CA rollover.
 Linux and macOS workers share the
 listening port. Use a single worker on Windows. Keep the gateway's existing
 shared Redis coordination when running multiple workers.
@@ -137,10 +142,11 @@ inference endpoints, protocols or client-side identity checks require review.
 Neither opaque tunnels nor a subscription login can guarantee compatibility
 with unannounced Anthropic features.
 
-The request-scoped credential restriction also applies to nested SDK calls within
-the request. Validate guardrails that invoke another model provider before enabling
-this mode. Such auxiliary calls currently fail closed rather than crossing the
-subscription credential boundary.
+The listener assigns the primary inference a fresh request ID and ignores a client
+supplied ID. The credential policy follows this ID across deployment attempts and
+also covers any auxiliary call that forwards the subscription credential. Model-based
+guardrails can use independent call IDs and their own provider credentials without
+inheriting the subscription identity. The SDK assigns independent calls their own IDs.
 
 Validate each client release before rollout and monitor native feature
 failures as well as gateway inference failures. Full repository CI, security

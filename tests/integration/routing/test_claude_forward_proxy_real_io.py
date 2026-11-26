@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import datetime
+import hashlib
 import ipaddress
 import ssl
 from collections.abc import AsyncIterator
@@ -27,8 +28,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 OAUTH: Final = "Bearer sk-ant-oat01-test-only"
 
 
-@pytest.fixture
-def certificates(tmp_path: Path) -> tuple[str, str, ssl.SSLContext]:
+def certificate_bundle(tmp_path: Path) -> tuple[str, str, ssl.SSLContext]:
     key: Final = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject: Final = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "api.anthropic.com")])
     certificate: Final = (
@@ -46,6 +46,8 @@ def certificates(tmp_path: Path) -> tuple[str, str, ssl.SSLContext]:
             critical=False,
         )
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+        .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(key.public_key()), critical=False)
         .sign(key, hashes.SHA256())
     )
     certificate_path: Final = tmp_path / "certificate.pem"
@@ -55,6 +57,11 @@ def certificates(tmp_path: Path) -> tuple[str, str, ssl.SSLContext]:
         key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
     )
     return str(certificate_path), str(key_path), ssl.create_default_context(cafile=str(certificate_path))
+
+
+@pytest.fixture
+def certificates(tmp_path: Path) -> tuple[str, str, ssl.SSLContext]:
+    return certificate_bundle(tmp_path)
 
 
 class Application:
@@ -321,7 +328,7 @@ async def test_lifespan_shuts_down_active_connections_and_releases_port(
     certificate, key, _ = certificates
     app: Final = Application()
     settings: Final = ClaudeForwardProxySettings(
-        enabled=True, certificate=certificate, private_key=key, port=unused_tcp_port
+        enabled=True, certificate=certificate, private_key=key, port=unused_tcp_port, shutdown_timeout_seconds=0.05
     )
     async with forward_proxy_lifespan(app, settings, {}, authenticated=True):
         reader, writer = await asyncio.open_connection("127.0.0.1", unused_tcp_port)
@@ -469,3 +476,79 @@ async def test_unapproved_connect_destinations_are_rejected(running: Running, de
         assert running.upstream.empty()
     finally:
         writer.close()
+
+
+async def test_graceful_shutdown_allows_an_inflight_inference_to_finish(running: Running) -> None:
+    async with running.client() as client:
+        request: Final = asyncio.create_task(
+            client.post("https://api.anthropic.com/v1/messages", content=b"{}", headers={"Authorization": OAUTH})
+        )
+        await asyncio.wait_for(running.app.requests.get(), 2)
+        closing: Final = asyncio.create_task(running.proxy.close(grace_period=2))
+        try:
+            await asyncio.sleep(0)
+            assert not closing.done()
+            running.app.release_stream.set()
+            response: Final = await asyncio.wait_for(request, 2)
+            assert response.status_code == 200
+            assert b"event: message_stop" in response.content
+            await asyncio.wait_for(closing, 2)
+        finally:
+            request.cancel()
+            closing.cancel()
+            await asyncio.gather(request, closing, return_exceptions=True)
+
+
+async def peer_fingerprint(port: int, context: ssl.SSLContext) -> str:
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    try:
+        credential: Final = base64.b64encode(b"litellm:sk-test")
+        writer.write(
+            b"CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\nProxy-Authorization: Basic "
+            + credential
+            + b"\r\n\r\n"
+        )
+        await writer.drain()
+        assert b" 200 " in await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 2)
+        await writer.start_tls(context, server_hostname="api.anthropic.com")
+        peer: Final = writer.get_extra_info("ssl_object")
+        assert isinstance(peer, ssl.SSLObject)
+        certificate: Final = peer.getpeercert(binary_form=True)
+        assert isinstance(certificate, bytes)
+        return hashlib.sha256(certificate).hexdigest()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+async def test_certificate_rotation_reloads_new_identity_without_disabling_verification(
+    tmp_path: Path,
+    unused_tcp_port: int,
+) -> None:
+    first_dir: Final = tmp_path / "first"
+    second_dir: Final = tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first_cert, first_key, trust = certificate_bundle(first_dir)
+    second_cert, second_key, _ = certificate_bundle(second_dir)
+    trust.load_verify_locations(cafile=second_cert)
+    settings: Final = ClaudeForwardProxySettings(
+        enabled=True,
+        certificate=first_cert,
+        private_key=first_key,
+        port=unused_tcp_port,
+        shutdown_timeout_seconds=0.05,
+    )
+    async with forward_proxy_lifespan(Application(), settings, {}, authenticated=True):
+        before: Final = await peer_fingerprint(unused_tcp_port, trust)
+    Path(first_cert).write_bytes(Path(second_cert).read_bytes())
+    Path(first_key).write_bytes(Path(second_key).read_bytes())
+    async with forward_proxy_lifespan(Application(), settings, {}, authenticated=True):
+        after: Final = await peer_fingerprint(unused_tcp_port, trust)
+    assert before != after
+    assert (
+        after
+        == hashlib.sha256(
+            x509.load_pem_x509_certificate(Path(second_cert).read_bytes()).public_bytes(serialization.Encoding.DER)
+        ).hexdigest()
+    )

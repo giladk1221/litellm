@@ -46,19 +46,26 @@ _nested_tool_call_failure: Final[ContextVar[bool]] = ContextVar("nested_tool_cal
 _request_parent_otel_span: Final[ContextVar[Span | None]] = ContextVar("request_parent_otel_span", default=None)
 
 _anthropic_subscription_token: Final[ContextVar[str | None]] = ContextVar("anthropic_subscription_token", default=None)
+_anthropic_subscription_call_id: Final[ContextVar[str | None]] = ContextVar("anthropic_subscription_call_id", default=None)
 
 
 @contextmanager
-def native_anthropic_subscription(token: str) -> Generator[None]:
+def native_anthropic_subscription(token: str, call_id: str | None = None) -> Generator[None]:
     previous: Final = _anthropic_subscription_token.set(token)
+    previous_id: Final = _anthropic_subscription_call_id.set(call_id)
     try:
         yield
     finally:
         _anthropic_subscription_token.reset(previous)
+        _anthropic_subscription_call_id.reset(previous_id)
 
 
 def native_anthropic_subscription_token() -> str | None:
     return _anthropic_subscription_token.get()
+
+
+def native_anthropic_subscription_call_id() -> str | None:
+    return _anthropic_subscription_call_id.get()
 
 
 @contextmanager

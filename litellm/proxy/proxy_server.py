@@ -15427,7 +15427,12 @@ def _with_client_oauth_token(
 ) -> BaseTokenCounter | None:
     if client_oauth_token is None or not isinstance(counter, AnthropicTokenCounter):
         return counter
-    return AnthropicTokenCounter(client_oauth_token=client_oauth_token)
+    from litellm._internal_context import native_anthropic_subscription_token
+
+    return AnthropicTokenCounter(
+        client_oauth_token=client_oauth_token,
+        prefer_client_oauth=native_anthropic_subscription_token() == client_oauth_token,
+    )
 
 
 def _get_provider_token_counter(

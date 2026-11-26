@@ -36,8 +36,9 @@ anthropic_count_tokens_handler: Final = AnthropicCountTokensHandler()
 class AnthropicTokenCounter(BaseTokenCounter):
     """Token counter implementation for Anthropic provider using the CountTokens API."""
 
-    def __init__(self, client_oauth_token: str | None = None) -> None:
+    def __init__(self, client_oauth_token: str | None = None, *, prefer_client_oauth: bool = False) -> None:
         self.client_oauth_token: Final = client_oauth_token
+        self.prefer_client_oauth: Final = prefer_client_oauth
 
     def should_use_token_counting_api(
         self,
@@ -139,11 +140,15 @@ class AnthropicTokenCounter(BaseTokenCounter):
         api_base: Final = optional_str(litellm_params.get("api_base"))
 
         try:
-            configured_auth_header: Final = await AnthropicModelInfo.aget_auth_header(
-                api_key=optional_str(litellm_params.get("api_key")) or litellm.anthropic_key or litellm.api_key,
-                api_base=api_base,
-                litellm_params=litellm_params,
-                allow_workload_identity=True,
+            configured_auth_header: Final = (
+                None
+                if self.prefer_client_oauth and self.client_oauth_token is not None
+                else await AnthropicModelInfo.aget_auth_header(
+                    api_key=optional_str(litellm_params.get("api_key")) or litellm.anthropic_key or litellm.api_key,
+                    api_base=api_base,
+                    litellm_params=litellm_params,
+                    allow_workload_identity=True,
+                )
             )
             auth_header: Final = (
                 configured_auth_header

@@ -223,18 +223,20 @@ class TestCountTokensUsesWorkloadIdentity:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("deployment_key", "expected_credentials"),
+        ("deployment_key", "prefer_client_oauth", "expected_credentials"),
         [
-            (None, {"authorization": f"Bearer {FAKE_OAUTH_TOKEN}", "x-api-key": None}),
-            (FAKE_REGULAR_KEY, {"authorization": None, "x-api-key": FAKE_REGULAR_KEY}),
+            (None, False, {"authorization": f"Bearer {FAKE_OAUTH_TOKEN}", "x-api-key": None}),
+            (FAKE_REGULAR_KEY, False, {"authorization": None, "x-api-key": FAKE_REGULAR_KEY}),
+            (FAKE_REGULAR_KEY, True, {"authorization": f"Bearer {FAKE_OAUTH_TOKEN}", "x-api-key": None}),
         ],
-        ids=["keyless-deployment-uses-the-callers-token", "deployment-key-wins-over-the-callers-token"],
+        ids=["keyless-deployment", "default-deployment-key-precedence", "explicit-client-oauth-precedence"],
     )
-    async def test_a_callers_subscription_token_counts_only_when_no_key_is_configured(
+    async def test_subscription_token_counting_obeys_explicit_credential_precedence(
         self,
         monkeypatch: pytest.MonkeyPatch,
         httpx_transport_clients: None,
         deployment_key: str | None,
+        prefer_client_oauth: bool,
         expected_credentials: dict[str, str | None],
     ) -> None:
         for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_BASE", "ANTHROPIC_BASE_URL"):
@@ -246,7 +248,9 @@ class TestCountTokensUsesWorkloadIdentity:
             route = router.post("https://api.anthropic.com/v1/messages/count_tokens").mock(
                 return_value=httpx.Response(200, json={"input_tokens": 17})
             )
-            result = await AnthropicTokenCounter(client_oauth_token=FAKE_OAUTH_TOKEN).count_tokens(
+            result = await AnthropicTokenCounter(
+                client_oauth_token=FAKE_OAUTH_TOKEN, prefer_client_oauth=prefer_client_oauth
+            ).count_tokens(
                 model_to_use="claude-sonnet-4-5",
                 messages=[{"role": "user", "content": "hi"}],
                 contents=None,
@@ -258,7 +262,9 @@ class TestCountTokensUsesWorkloadIdentity:
         assert result.total_tokens == 17
         sent = route.calls.last.request.headers
         assert {name: sent.get(name) for name in expected_credentials} == expected_credentials
-        assert (ANTHROPIC_OAUTH_BETA_HEADER in sent["anthropic-beta"].split(",")) is (deployment_key is None)
+        assert (ANTHROPIC_OAUTH_BETA_HEADER in sent["anthropic-beta"].split(",")) is (
+            deployment_key is None or prefer_client_oauth
+        )
 
     @pytest.mark.asyncio
     async def test_a_failed_mint_degrades_like_an_anthropic_error(self, monkeypatch):

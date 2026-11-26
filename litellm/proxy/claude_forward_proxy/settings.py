@@ -32,6 +32,7 @@ class ClaudeForwardProxySettings(BaseModel):
     idle_timeout_seconds: float = Field(default=120, gt=0)
     max_connections: int = Field(default=256, ge=1)
     connection_lifetime_seconds: float = Field(default=3600, gt=0)
+    shutdown_timeout_seconds: float = Field(default=30, ge=0)
     service_paths: tuple[str, ...] = ("/api/oauth/", "/api/claude_code/", "/api/event_logging/")
 
     @model_validator(mode="after")

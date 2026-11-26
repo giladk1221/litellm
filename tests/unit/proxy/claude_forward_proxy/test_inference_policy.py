@@ -3,10 +3,14 @@ from typing import Final
 
 import pytest
 
-from litellm._internal_context import native_anthropic_subscription, native_anthropic_subscription_token
+from litellm._internal_context import (
+    native_anthropic_subscription,
+    native_anthropic_subscription_call_id,
+    native_anthropic_subscription_token,
+)
 from litellm.exceptions import BadRequestError
 from litellm.llms.anthropic.common_utils import AnthropicModelInfo
-from litellm.proxy.claude_forward_proxy.inference_policy import NativeInferencePolicy
+from litellm.proxy.claude_forward_proxy.inference_policy import NativeInferencePolicy, validate_native_target
 from litellm.proxy.claude_forward_proxy.settings import ClaudeForwardProxySettings
 from litellm.proxy.rust_forward.mode import validate_claude_listener_runtime
 from litellm.types.utils import CallTypes
@@ -52,18 +56,37 @@ async def test_native_policy_disables_response_cache_without_changing_regular_re
 def test_native_authentication_never_builds_credentials_for_another_origin(base: str) -> None:
     with native_anthropic_subscription("sk-ant-oat01-test"):
         with pytest.raises(BadRequestError, match="Anthropic API origin"):
-            AnthropicModelInfo.get_auth_header(api_base=base)
+            validate_native_target({"model": "anthropic/test", "api_base": base})
 
 
-def test_native_token_count_auth_uses_the_client_account_and_restores_outer_context() -> None:
-    with native_anthropic_subscription("sk-ant-oat01-outer"):
-        with native_anthropic_subscription("sk-ant-oat01-inner"):
+def test_native_context_preserves_auxiliary_provider_credentials_and_restores_outer_context() -> None:
+    with native_anthropic_subscription("sk-ant-oat01-outer", "outer"):
+        with native_anthropic_subscription("sk-ant-oat01-inner", "inner"):
             headers: Final = AnthropicModelInfo.get_auth_header(api_key="server-owned-key")
             assert headers is not None
-            assert headers["authorization"] == "Bearer sk-ant-oat01-inner"
-            assert "x-api-key" not in headers
+            assert headers["x-api-key"] == "server-owned-key"
+            assert "authorization" not in headers
+            assert native_anthropic_subscription_call_id() == "inner"
         assert native_anthropic_subscription_token() == "sk-ant-oat01-outer"
+        assert native_anthropic_subscription_call_id() == "outer"
     assert native_anthropic_subscription_token() is None
+    assert native_anthropic_subscription_call_id() is None
+
+
+@pytest.mark.asyncio
+async def test_auxiliary_model_calls_use_their_own_provider_without_bypassing_the_main_request() -> None:
+    policy: Final = NativeInferencePolicy()
+    request: Final = {"model": "openai/test", "api_key": "guardrail-key", "litellm_call_id": "guardrail-call"}
+    with native_anthropic_subscription("sk-ant-oat01-native", "main-call"):
+        assert await policy.async_pre_call_deployment_hook(request, CallTypes.acompletion) is None
+        with pytest.raises(BadRequestError, match="another provider"):
+            await policy.async_pre_call_deployment_hook(
+                {**request, "litellm_call_id": "main-call"}, CallTypes.anthropic_messages
+            )
+        with pytest.raises(BadRequestError, match="another provider"):
+            await policy.async_pre_call_deployment_hook(
+                {**request, "extra_headers": {"Authorization": "Bearer sk-ant-oat01-native"}}, CallTypes.acompletion
+            )
 
 
 @pytest.mark.parametrize("path", ["/", "/api/", "/v1/", "/api/../v1/", "/api/%2e/", "/api/service?token=x"])
