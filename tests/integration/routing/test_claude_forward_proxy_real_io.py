@@ -68,11 +68,16 @@ class Application:
     def __init__(self) -> None:
         self.requests: asyncio.Queue[tuple[Scope, bytes]] = asyncio.Queue()
         self.active = True
+        self.bound_client: tuple[str, int] | None = None
         self.release_stream = asyncio.Event()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         headers: Final = dict(scope["headers"])
-        allowed: Final = self.active and headers.get(b"x-litellm-api-key") == b"Bearer sk-test"
+        allowed: Final = (
+            self.active
+            and headers.get(b"x-litellm-api-key") == b"Bearer sk-test"
+            and (self.bound_client is None or scope.get("client") == self.bound_client)
+        )
         if scope["path"] == "/v1/models" or not allowed:
             await send({"type": "http.response.start", "status": 200 if allowed else 401, "headers": []})
             await send({"type": "http.response.body", "body": b"{}"})
@@ -111,8 +116,13 @@ class Running:
         )
         return httpx.AsyncClient(proxy=proxy, verify=self.tls, timeout=5)
 
-    async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+    async def connect(self, *, bind_auth_to_peer: bool = False) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         reader, writer = await asyncio.open_connection("127.0.0.1", self.port, ssl=self.tls if self.secure else None)
+        if bind_auth_to_peer:
+            address: Final[object] = writer.get_extra_info("sockname")
+            assert isinstance(address, tuple) and len(address) >= 2
+            assert isinstance(address[0], str) and isinstance(address[1], int)
+            self.app.bound_client = (address[0], address[1])
         credential: Final = base64.b64encode(b"litellm:sk-test")
         writer.write(
             b"CONNECT api.anthropic.com:443 HTTP/1.1\r\nHost: api.anthropic.com:443\r\nProxy-Authorization: Basic "
@@ -270,6 +280,23 @@ async def test_invalid_gateway_key_never_reaches_anthropic(running: Running) -> 
         with pytest.raises(httpx.ProxyError, match="407"):
             await client.get("https://api.anthropic.com/api/oauth/usage")
     assert running.upstream.empty()
+
+
+@pytest.mark.parametrize("running", [False, True], indirect=True)
+async def test_connect_and_service_authentication_use_the_connecting_peer(running: Running) -> None:
+    reader, writer = await running.connect(bind_auth_to_peer=True)
+    try:
+        writer.write(
+            b"GET /api/oauth/usage HTTP/1.1\r\nHost: api.anthropic.com\r\n"
+            b"Authorization: " + OAUTH.encode() + b"\r\nConnection: close\r\n\r\n"
+        )
+        await writer.drain()
+        response: Final = await asyncio.wait_for(reader.read(), timeout=5)
+        assert response.startswith(b"HTTP/1.1 200"), response
+        assert b'{"service":"native"}' in response
+    finally:
+        writer.close()
+        await writer.wait_closed()
 
 
 async def test_api_key_inference_is_rejected_without_upstream_fallback(running: Running) -> None:

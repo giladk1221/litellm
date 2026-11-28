@@ -32,7 +32,15 @@ from litellm.proxy.rust_forward.mode import validate_claude_listener_runtime
 ANTHROPIC_HOST: Final = "api.anthropic.com"
 STATUS_CODE: Final = TypeAdapter(int)
 RESPONSE_BODY: Final = TypeAdapter(bytes)
+PEER_ADDRESS: Final[TypeAdapter[tuple[str, int] | tuple[str, int, int, int]]] = TypeAdapter(
+    tuple[str, int] | tuple[str, int, int, int]
+)
 Connector: TypeAlias = Callable[[str, bool], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
+
+
+def client_address(connection: HTTPConnection) -> tuple[str, int]:
+    address: Final = PEER_ADDRESS.validate_python(connection.writer.get_extra_info("peername"), strict=True)
+    return (address[0], address[1])
 
 
 async def public_connection(hostname: str, encrypted: bool) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
@@ -126,13 +134,14 @@ class ClaudeForwardProxy:
             raise ValueError("Claude forward proxy is disabled or has no inspection certificate")
         self.inspection_tls.load_cert_chain(settings.certificate, settings.private_key)
         self.inspection_tls.set_alpn_protocols(["http/1.1"])
-        self.auth_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://litellm")
 
-    async def authorized(self, key: str) -> bool:
-        response: Final = await asyncio.wait_for(
-            self.auth_client.get("/v1/models", headers={"x-litellm-api-key": f"Bearer {key}"}), timeout=30
-        )
-        return response.status_code == 200
+    async def authorized(self, key: str, connection: HTTPConnection) -> bool:
+        transport: Final = httpx.ASGITransport(app=self.app, client=client_address(connection))
+        async with httpx.AsyncClient(transport=transport, base_url="http://litellm") as client:
+            response: Final = await asyncio.wait_for(
+                client.get("/v1/models", headers={"x-litellm-api-key": f"Bearer {key}"}), timeout=30
+            )
+            return response.status_code == 200
 
     def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if len(self.connections) >= self.settings.max_connections:
@@ -154,7 +163,6 @@ class ClaudeForwardProxy:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await self.auth_client.aclose()
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         connection: Final = HTTPConnection(reader, writer, self.settings.idle_timeout_seconds)
@@ -183,7 +191,7 @@ class ClaudeForwardProxy:
             await connection.reject(403, b"Destination not allowed")
             return
         key: Final = gateway_key(request.headers)
-        if key is None or not await self.authorized(key):
+        if key is None or not await self.authorized(key, connection):
             await connection.reject(407, b"LiteLLM authentication required")
             return
         if await connection.body(0) != b"" or connection.state.trailing_data[0]:
@@ -243,7 +251,7 @@ class ClaudeForwardProxy:
             verbose_proxy_logger.debug("Claude native proxy denied service path %r", path)
             await connection.reject(403, b"Native service path is not approved in claude_forward_proxy.service_paths")
             return
-        if not await self.authorized(key):
+        if not await self.authorized(key, connection):
             await connection.reject(403, b"LiteLLM access revoked")
             return
         await self.service(connection, request, body)
@@ -268,7 +276,7 @@ class ClaudeForwardProxy:
             "raw_path": path,
             "query_string": query,
             "root_path": "",
-            "client": connection.writer.get_extra_info("peername"),
+            "client": client_address(connection),
             "server": (ANTHROPIC_HOST, 443),
             "headers": [
                 *headers,
