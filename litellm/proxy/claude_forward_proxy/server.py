@@ -225,34 +225,39 @@ class ClaudeForwardProxy:
         if not request.target.startswith(b"/") or request.target.startswith(b"//") or b"#" in request.target:
             await connection.reject(400, b"Expected origin-form request target")
             return
-        if headers.get(b"expect", b"").lower() == b"100-continue":
-            await connection.send(h11.InformationalResponse(status_code=100, headers=[]))
-        body: Final = await connection.body(self.settings.max_body_bytes)
-        if body is None:
-            await connection.reject(413, b"Request body too large")
-            return
         path: Final = unquote_to_bytes(request.target.partition(b"?")[0])
         if any(token in path for token in (b"%", b"\\", b"//")) or any(
             part in (b".", b"..") for part in path.split(b"/")
         ):
             await connection.reject(400, b"Ambiguous request path")
             return
-        if path.rstrip(b"/") in (b"/v1/messages", b"/v1/messages/count_tokens"):
+        is_inference: Final = path.rstrip(b"/") in (b"/v1/messages", b"/v1/messages/count_tokens")
+        if is_inference:
             oauth: Final = headers.get(b"authorization", b"")
             if request.method != b"POST" or not oauth.startswith(b"Bearer sk-ant-oat") or b"x-api-key" in headers:
                 await connection.reject(401, b"Claude subscription OAuth is required")
                 return
-            await self.inference(connection, request, body, key, path.rstrip(b"/"))
-            return
-        if path.startswith((b"/v1/messages/", b"/v1/complete", b"/v1/chat/", b"/v1/responses")):
+        elif path.startswith((b"/v1/messages/", b"/v1/complete", b"/v1/chat/", b"/v1/responses")):
             await connection.reject(403, b"Inference must use POST /v1/messages")
             return
-        if not self.settings.permits_service(path):
+        elif not self.settings.permits_service(path):
             verbose_proxy_logger.debug("Claude native proxy denied service path %r", path)
             await connection.reject(403, b"Native service path is not approved in claude_forward_proxy.service_paths")
             return
-        if not await self.authorized(key, connection):
+        elif not await self.authorized(key, connection):
             await connection.reject(403, b"LiteLLM access revoked")
+            return
+        if int(headers.get(b"content-length", b"0")) > self.settings.max_body_bytes:
+            await connection.reject(413, b"Request body too large")
+            return
+        if headers.get(b"expect", b"").lower() == b"100-continue":
+            await connection.send(h11.InformationalResponse(status_code=100, headers=[]))
+        body: Final = await connection.body(self.settings.max_body_bytes)
+        if body is None:
+            await connection.reject(413, b"Request body too large")
+            return
+        if is_inference:
+            await self.inference(connection, request, body, key, path.rstrip(b"/"))
             return
         await self.service(connection, request, body)
 

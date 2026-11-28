@@ -339,6 +339,34 @@ async def test_large_bodies_are_rejected_before_any_upstream_request(running: Ru
 
 
 @pytest.mark.parametrize(
+    ("path", "credential", "length", "status"),
+    [
+        ("/api/unapproved", OAUTH, 2, 403),
+        ("/v1/messages", "Bearer invalid", 2, 401),
+        ("/v1/messages", OAUTH, 1025, 413),
+        ("/api/oauth/usage", OAUTH, 1025, 413),
+    ],
+)
+async def test_invalid_requests_are_rejected_before_requesting_the_body(
+    running: Running, path: str, credential: str, length: int, status: int
+) -> None:
+    reader, writer = await running.connect()
+    try:
+        writer.write(
+            f"POST {path} HTTP/1.1\r\nHost: api.anthropic.com\r\nAuthorization: {credential}\r\n"
+            f"Content-Length: {length}\r\nExpect: 100-continue\r\n\r\n".encode()
+        )
+        await writer.drain()
+        response: Final = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+        assert f"HTTP/1.1 {status} ".encode() in response, response
+        assert running.upstream.empty()
+        assert running.app.requests.empty()
+    finally:
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.parametrize(
     ("path", "status"),
     [
         ("/v1/%6dessages", 200),
